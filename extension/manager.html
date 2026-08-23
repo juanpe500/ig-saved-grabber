@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IG Saved — Manager</title>
+  <style>
+    :root {
+      --bg: #0f0f10;
+      --panel: #1a1a1c;
+      --panel2: #232326;
+      --border: #2e2e32;
+      --text: #f2f2f3;
+      --muted: #9a9aa2;
+      --accent: #0095f6;
+      --pink: #e0245e;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10; background: rgba(15,15,16,.92);
+      backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+      padding: 14px 22px;
+    }
+    .bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .brand {
+      display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px;
+    }
+    .brand img { width: 26px; height: 26px; border-radius: 7px; }
+    .count {
+      background: var(--accent); color: #fff; font-weight: 700; font-size: 12px;
+      border-radius: 11px; padding: 2px 10px;
+    }
+    .search {
+      flex: 1 1 320px; min-width: 200px; position: relative;
+    }
+    .search input {
+      width: 100%; padding: 10px 12px 10px 36px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--panel); color: var(--text);
+      font-size: 14px; outline: none;
+    }
+    .search input:focus { border-color: var(--accent); }
+    .search svg { position: absolute; left: 11px; top: 10px; color: var(--muted); }
+    select, .btn {
+      padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--text); font-size: 13px; cursor: pointer;
+    }
+    .btn:hover, select:hover { background: var(--panel2); }
+    .btn.accent { background: var(--accent); border-color: var(--accent); font-weight: 600; }
+    .btn.danger { color: var(--pink); }
+    main { padding: 20px 22px 80px; }
+    .grid {
+      display: grid; gap: 16px;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      overflow: hidden; display: flex; flex-direction: column; position: relative;
+    }
+    .thumb {
+      position: relative; aspect-ratio: 3 / 4; background: var(--panel2);
+      display: block; overflow: hidden;
+    }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .thumb .ph {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; color: var(--muted); font-size: 12px; text-align: center;
+      padding: 10px;
+    }
+    .badge {
+      position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.62);
+      color: #fff; font-size: 11px; font-weight: 600; padding: 3px 8px;
+      border-radius: 8px; display: flex; align-items: center; gap: 4px;
+    }
+    .del {
+      position: absolute; top: 8px; right: 8px; width: 26px; height: 26px;
+      border-radius: 50%; border: 0; background: rgba(0,0,0,.62); color: #fff;
+      cursor: pointer; font-size: 15px; line-height: 1; display: none;
+    }
+    .card:hover .del { display: block; }
+    .del:hover { background: var(--pink); }
+    .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .desc {
+      font-size: 12.5px; color: #d7d7db; margin: 0;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .desc.empty { color: var(--muted); font-style: italic; }
+    .desc:not(.empty) { cursor: help; }
+    /* floating full-description popover on hover */
+    .desc-pop {
+      position: fixed; z-index: 60; background: #0b0b0c; color: #ececf0;
+      border: 1px solid var(--accent); border-radius: 12px; padding: 12px 14px;
+      font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+      box-shadow: 0 12px 34px rgba(0,0,0,.65); pointer-events: none; max-height: 72vh;
+      overflow: hidden;
+    }
+    .foot { display: flex; justify-content: space-between; align-items: center; margin-top: auto; }
+    .open {
+      color: var(--accent); text-decoration: none; font-size: 12px; font-weight: 600;
+    }
+    .open:hover { text-decoration: underline; }
+    .code { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; }
+    .stat-line { font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
+    .stat-line.cleared { color: #2ecc71; }
+    .stat-line.pending { color: #e0a500; }
+    .del.restore { font-size: 14px; }
+    .del.restore:hover { background: var(--accent); }
+    .pager {
+      display: flex; gap: 8px; align-items: center; justify-content: center;
+      margin-top: 26px; flex-wrap: wrap;
+    }
+    .pager .btn[disabled] { opacity: .4; cursor: default; }
+    .pageinfo { color: var(--muted); font-size: 13px; }
+    .empty-state {
+      text-align: center; color: var(--muted); padding: 80px 20px;
+    }
+    .empty-state h2 { color: var(--text); margin-bottom: 6px; }
+    mark { background: #ffd84d; color: #000; border-radius: 3px; padding: 0 1px; }
+    /* tags panel */
+    .tags-panel {
+      border-bottom: 1px solid var(--border); background: var(--panel);
+      padding: 16px 22px 18px;
+    }
+    .tags-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .tags-head strong { font-size: 15px; }
+    .tags-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .tag-search {
+      padding: 8px 11px; border-radius: 9px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 13px; outline: none; min-width: 150px;
+    }
+    .tag-search:focus { border-color: var(--accent); }
+    .tags-hint { color: var(--muted); font-size: 12px; margin: 8px 0 12px; }
+    .tagcloud { display: flex; flex-wrap: wrap; gap: 8px; max-height: 320px; overflow: auto; }
+    .tag {
+      display: inline-flex; align-items: center; gap: 0; background: var(--panel2);
+      border: 1px solid var(--border); border-radius: 999px; overflow: hidden;
+      font-size: 13px;
+    }
+    .tag .word {
+      padding: 5px 4px 5px 12px; cursor: pointer; color: var(--text); white-space: nowrap;
+    }
+    .tag .word:hover { color: var(--accent); }
+    .tag .n {
+      padding: 5px 8px; color: var(--muted); font-variant-numeric: tabular-nums;
+      font-weight: 600; font-size: 12px;
+    }
+    .tag .x {
+      border: 0; background: transparent; color: var(--muted); cursor: pointer;
+      padding: 5px 9px 5px 4px; font-size: 14px; line-height: 1;
+    }
+    .tag .x:hover { color: var(--pink); }
+    .tag.hot { border-color: var(--accent); }
+    .tag.unknown { border-style: dashed; border-color: var(--muted); }
+    .tag.unknown .word { color: var(--muted); }
+    /* include (blue) / exclude (red) filter states */
+    .tag.inc { background: var(--accent); border-color: var(--accent); }
+    .tag.exc { background: var(--pink); border-color: var(--pink); }
+    .tag.inc .word, .tag.inc .n, .tag.exc .word, .tag.exc .n { color: #fff; }
+    .tag.inc .x, .tag.exc .x { color: rgba(255,255,255,.8); }
+    .tag.inc .x:hover, .tag.exc .x:hover { color: #fff; }
+    .tag.inc.unknown, .tag.exc.unknown { border-style: dashed; }
+    .tag.inc.unknown .word, .tag.exc.unknown .word { color: #fff; }
+    /* copy-select ring (Ctrl/⌘+click), independent of filter state */
+    .tag.pick { box-shadow: inset 0 0 0 2px #ffd84d; }
+    .tags-hint b { color: #cfcfd4; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <div class="brand">
+        <img src="icons/icon48.png" alt="" />
+        <span>IG Saved</span>
+        <span class="count" id="count">0</span>
+      </div>
+      <label class="search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        <input id="search" type="search" placeholder="Search descriptions…" autocomplete="off" />
+      </label>
+      <select id="filter" title="Filter by type">
+        <option value="all">All</option>
+        <option value="reel">Reels only</option>
+        <option value="post">Posts only</option>
+        <option value="desc">Has description</option>
+      </select>
+      <select id="perpage" title="Per page">
+        <option value="24">24 / page</option>
+        <option value="48">48 / page</option>
+        <option value="96">96 / page</option>
+      </select>
+      <button class="btn" id="gentags">🏷 Generate tags</button>
+      <button class="btn" id="json">Export JSON</button>
+      <button class="btn" id="csv">Export CSV</button>
+      <button class="btn" id="viewToggle">🗑 Deleted (0)</button>
+    </div>
+  </header>
+
+  <section class="tags-panel" id="tagsPanel" style="display:none">
+    <div class="tags-head">
+      <div>
+        <strong>Tag map</strong>
+        <span class="pageinfo" id="tagStat"></span>
+      </div>
+      <div class="tags-actions">
+        <input id="tagSearch" class="tag-search" type="search" placeholder="Filter tags…" autocomplete="off" />
+        <select id="tagSortMode" title="Sort tags">
+          <option value="count-desc">Count ↓</option>
+          <option value="count-asc">Count ↑</option>
+          <option value="az">A → Z</option>
+          <option value="za">Z → A</option>
+        </select>
+        <button class="btn accent" id="tagCopy" disabled>Copy selected (0)</button>
+        <button class="btn" id="tagExport">Export tags CSV</button>
+        <button class="btn danger" id="tagClear">Clear tags</button>
+      </div>
+    </div>
+    <p class="tags-hint">
+      <b>Click</b> to cycle a tag: <b style="color:var(--accent)">include</b> →
+      <b style="color:var(--pink)">exclude</b> → off (combine many for advanced filters) ·
+      <b>Ctrl/⌘+click</b> select for copy · <b>×</b> ignore &amp; re-scan.
+      <span id="ignoreInfo"></span>
+    </p>
+    <div class="tagcloud" id="tagcloud"></div>
+  </section>
+
+  <section class="tags-panel" id="deletedBar" style="display:none">
+    <div class="tags-head">
+      <div>
+        <strong>🗑 Deleted list</strong>
+        <span class="pageinfo" id="deletedStat"></span>
+      </div>
+      <div class="tags-actions">
+        <select id="deletedStatus" title="Filter by clean status">
+          <option value="all">All</option>
+          <option value="pending">Pending on IG</option>
+          <option value="cleared">Cleared on IG</option>
+        </select>
+        <button class="btn" id="restorePending">Restore pending (0)</button>
+        <button class="btn" id="exportDeleted">Export deleted JSON</button>
+        <button class="btn danger" id="removeCleared">Remove cleared (0)</button>
+      </div>
+    </div>
+    <p class="tags-hint">
+      Deleted items are kept here (out of the gallery &amp; tag map) so the upcoming
+      <b>Clean deleted</b> tool can remove them from Instagram. Restore un-cleared ones,
+      or purge the ones already cleared on IG.
+    </p>
+  </section>
+
+  <main>
+    <div class="grid" id="grid"></div>
+    <div class="empty-state" id="empty" style="display:none">
+      <h2>Nothing here yet</h2>
+      <p>Open your Instagram saved page, run the grabber's auto-scroll, then come back.</p>
+    </div>
+    <div class="pager" id="pager"></div>
+  </main>
+
+  <script src="manager.js"></script>
+</body>
+</html>

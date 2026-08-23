@@ -1,0 +1,29 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# Node (in case tooling is added later)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Packaged builds
+*.zip
+*.crx
+*.pem
+web-ext-artifacts/
+
+# Local scratch / dev-only reference
+scratchpad/
+ig_saved_row_example.html
+
+# Exports produced by the extension itself
+ig_saved_*.json
+ig_saved_*.csv
+ig_tags_*.csv
+ig_deleted_*.json
