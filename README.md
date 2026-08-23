@@ -32,7 +32,7 @@ It captures each saved post's **URL, thumbnail, description and type (reel/post)
 - **🔎 Instant search** — filter by description text with live highlighting; hover any card to read the full caption in a floating popover.
 - **🏷️ Tag map** — scans every description, strips stop-words (English **and** Spanish), merges singular/plural (`app`/`apps`), and shows you a ranked map of the words you save most. Hashtags included.
 - **🔵🔴 Advanced tag filters** — click a tag to **include** it (blue), click again to **exclude** it (red), click again to clear. Combine as many as you want for `A AND B AND NOT C` queries. Remaining tags **re-count live** against the current results and hide themselves when they hit zero.
-- **🗑️ Deleted list & safe cleanup** — removing a post doesn't destroy it; it moves to an isolated list, ready for the upcoming *Clean deleted* tool to un-save it from Instagram. Restore or purge anytime.
+- **🗑️ Deleted list & safe cleanup** — removing a post doesn't destroy it; it moves to an isolated list. The **🧹 Clean deleted** automation then opens each one on Instagram and un-saves it for you (with verification), marking it cleared. Restore or purge anytime.
 - **📤 Export anything** — the gallery, a filtered subset, the tag map, or the deleted list — as **JSON** or **CSV** (Excel-safe UTF-8).
 - **🔒 Zero backend** — no account, no API keys, no network calls. Everything lives in `chrome.storage.local`.
 
@@ -87,7 +87,9 @@ Hit **🏷 Generate tags** to scan every description. Then:
 Stack multiple include/exclude tags for precise, progressive filtering.
 
 ### 4 · Curate & clean up
-Remove posts you're done with (**×** on a card) — they move to the **Deleted** list instead of vanishing. From there, restore the ones you kept by mistake, or keep them queued for Instagram cleanup.
+Remove posts you're done with (**×** on a card) — they move to the **Deleted** list instead of vanishing. Then, on your Instagram saved page, hit **🧹 Clean deleted** in the grabber panel: it opens each queued post, un-saves it (verifying the bookmark actually flipped), closes the dialog, and marks it *cleared on Instagram* — all at a deliberately gentle pace. Back in the manager's **Deleted** view you can restore the un-cleared ones or purge the cleared ones for good.
+
+> The cleaner only ever touches posts **you** put in the deleted list, verifies each removal, and can be stopped at any time. Keep the tab focused while it runs.
 
 ## 🧾 What gets captured
 
@@ -118,7 +120,7 @@ Everything runs on your device. The extension has **no backend, no analytics, an
 - [x] Tag map with stop-words, plural-merging & hashtags
 - [x] Multi-tag include/exclude filtering with live counts
 - [x] Isolated deleted list with clean-status tracking
-- [ ] **Clean deleted** — auto-remove queued posts from Instagram (auto-scroll → find → un-save → mark cleared)
+- [x] **Clean deleted** — auto-remove queued posts from Instagram (auto-scroll → find → un-save → verify → mark cleared)
 
 ## 🛠️ Tech
 

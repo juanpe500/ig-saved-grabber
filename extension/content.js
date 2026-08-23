@@ -25,9 +25,37 @@
 
   let items = {};        // in-memory mirror of the store
   let deletedSet = new Set(); // shortcodes already deleted — don't re-capture
+  let deletedMap = {};   // shortcode -> deleted item (mirror of DELETED_KEY)
   let autoTimer = null;  // auto-scroll interval id
   let idleRounds = 0;    // consecutive scrolls with no height growth
   let lastHeight = 0;
+
+  // ---- "clean deleted" automation state ----
+  let cleanerActive = false;
+  let cleanerStop = false;
+  let cleanStats = { cleared: 0, failed: 0 };
+  // Conservative pacing so Instagram doesn't rate-limit or misfire.
+  const CLEAN_CFG = {
+    openDelay: 850,     // after clicking a post, before looking for the modal
+    modalTimeout: 6000, // how long to wait for the modal Remove button
+    verifyTimeout: 3000,// how long to wait for the Save/Remove flip
+    actionDelay: 650,   // after clicking Remove
+    closeDelay: 650,    // after closing the modal
+    betweenItems: 900,  // pause between posts
+    scrollStep: 0.85,   // viewport fraction to scroll when seeking more
+    scrollWait: 900,    // wait after a scroll for lazy content
+  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function waitFor(fn, timeout, step = 150) {
+    const t0 = Date.now();
+    for (;;) {
+      let v;
+      try { v = fn(); } catch (_) { v = null; }
+      if (v) return v;
+      if (Date.now() - t0 > timeout) return null;
+      await sleep(step);
+    }
+  }
 
   // ---- extraction ----
   // Match /p/<code>/, /reel/<code>/, /tv/<code>/
@@ -175,6 +203,164 @@
     download("ig_saved_" + stamp() + ".csv", "﻿" + lines.join("\r\n"), "text/csv");
   }
 
+  // ---- clean deleted from Instagram ----
+  function codeFromHref(href) {
+    const m = (href || "").match(SHORTCODE_RE);
+    return m ? m[2] : null;
+  }
+
+  // First loaded grid anchor whose shortcode is still pending.
+  function findPendingAnchor(pending) {
+    const anchors = document.querySelectorAll(
+      'a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]'
+    );
+    for (const a of anchors) {
+      const c = codeFromHref(a.getAttribute("href"));
+      if (c && pending.has(c)) return { a, c };
+    }
+    return null;
+  }
+
+  function dialog() {
+    return document.querySelector('div[role="dialog"]');
+  }
+
+  const onSavedGrid = () => /\/saved\//.test(location.pathname) && !dialog();
+
+  async function closeModal() {
+    for (let i = 0; i < 3; i++) {
+      if (onSavedGrid()) return; // already back on the grid
+      const closeSvg = document.querySelector('div[role="dialog"] svg[aria-label="Close"]');
+      if (closeSvg) {
+        const b = closeSvg.closest('[role="button"]') || closeSvg.parentElement;
+        if (b) b.click();
+      } else {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, which: 27, bubbles: true })
+        );
+      }
+      await sleep(CLEAN_CFG.closeDelay);
+    }
+    // Last resort (e.g. a reel opened as its own full page): navigate back.
+    if (!onSavedGrid()) {
+      history.back();
+      await waitFor(onSavedGrid, 3000);
+    }
+  }
+
+  // Open one saved post, hit its Remove (un-save) control, verify, then close.
+  // Returns true only when the bookmark visibly flipped to "Save".
+  async function processItem(a, code) {
+    setCleanStatus("Opening " + code + " …");
+    a.scrollIntoView({ block: "center" });
+    await sleep(250);
+    a.click(); // Instagram routes to the post modal
+    await sleep(CLEAN_CFG.openDelay);
+
+    // The save/remove toggle: while saved, its icon is labelled "Remove".
+    const removeSvg = await waitFor(
+      () =>
+        document.querySelector('div[role="dialog"] svg[aria-label="Remove"]') ||
+        document.querySelector('svg[aria-label="Remove"]'),
+      CLEAN_CFG.modalTimeout
+    );
+    if (!removeSvg) {
+      setCleanStatus("No Remove button for " + code + " — skipped.");
+      await closeModal();
+      return false;
+    }
+    const scope = removeSvg.closest('div[role="dialog"]') || document;
+    const btn = removeSvg.closest('[role="button"]');
+    if (!btn) { await closeModal(); return false; }
+    btn.click();
+
+    // Confirm the un-save actually took: the icon flips to "Save".
+    const ok = await waitFor(
+      () => scope.querySelector('svg[aria-label="Save"]'),
+      CLEAN_CFG.verifyTimeout
+    );
+    await sleep(CLEAN_CFG.actionDelay);
+    await closeModal();
+    return !!ok;
+  }
+
+  async function markCleared(code) {
+    const r = await chrome.storage.local.get(DELETED_KEY);
+    const dmap = r[DELETED_KEY] || {};
+    if (dmap[code]) {
+      dmap[code].cleared_on_ig = true;
+      dmap[code].cleared_at = new Date().toISOString();
+      await chrome.storage.local.set({ [DELETED_KEY]: dmap });
+    }
+    deletedMap = dmap;
+  }
+
+  async function runCleaner() {
+    const r = await chrome.storage.local.get(DELETED_KEY);
+    deletedMap = r[DELETED_KEY] || {};
+    const pending = new Set(
+      Object.values(deletedMap).filter((d) => !d.cleared_on_ig).map((d) => d.shortcode)
+    );
+    if (!pending.size) {
+      setCleanStatus("Nothing pending to clean.");
+      return;
+    }
+    if (
+      !confirm(
+        "Clean " + pending.size + " deleted post(s) from your Instagram saved?\n\n" +
+        "This opens each one and un-saves it. Keep this tab focused and don't touch the page while it runs."
+      )
+    ) return;
+
+    cleanerActive = true;
+    cleanerStop = false;
+    cleanStats = { cleared: 0, failed: 0 };
+    setCleanBtn(true);
+    const total = pending.size;
+    let idle = 0;
+
+    while (!cleanerStop && pending.size) {
+      const hit = findPendingAnchor(pending);
+      if (hit) {
+        idle = 0;
+        let ok = false;
+        try { ok = await processItem(hit.a, hit.c); } catch (_) { ok = false; }
+        if (ok) { await markCleared(hit.c); cleanStats.cleared++; }
+        else cleanStats.failed++;
+        pending.delete(hit.c);
+        updateCleanCount();
+        setCleanStatus(
+          "Cleared " + cleanStats.cleared + "/" + total +
+          (cleanStats.failed ? " · " + cleanStats.failed + " failed" : "") +
+          " · " + pending.size + " left"
+        );
+        await sleep(CLEAN_CFG.betweenItems);
+      } else {
+        // None of the remaining pending posts are loaded — scroll for more.
+        const before = document.documentElement.scrollHeight;
+        window.scrollBy(0, Math.round(window.innerHeight * CLEAN_CFG.scrollStep));
+        await sleep(CLEAN_CFG.scrollWait);
+        const after = document.documentElement.scrollHeight;
+        if (after <= before) { idle++; if (idle >= 5) break; } else idle = 0;
+      }
+    }
+
+    cleanerActive = false;
+    setCleanBtn(false);
+    const leftover = pending.size;
+    setCleanStatus(
+      (cleanerStop ? "Stopped. " : "Done. ") +
+      "Cleared " + cleanStats.cleared +
+      (cleanStats.failed ? ", " + cleanStats.failed + " failed" : "") +
+      (leftover ? ", " + leftover + " not found (still pending)." : ".")
+    );
+  }
+
+  function stopCleaner() {
+    cleanerStop = true;
+    setCleanStatus("Stopping after current item…");
+  }
+
   // ---- UI ----
   function setStatus(msg) {
     const el = document.getElementById("igsg-status");
@@ -191,6 +377,33 @@
     if (!b) return;
     b.textContent = running ? "⏸ Stop auto-scroll" : "▶ Auto-scroll to bottom";
     b.classList.toggle("igsg-running", running);
+  }
+
+  function setCleanStatus(msg) {
+    const el = document.getElementById("igsg-clean-status");
+    if (el) el.textContent = msg;
+  }
+
+  function pendingCount() {
+    return Object.values(deletedMap).filter((d) => !d.cleared_on_ig).length;
+  }
+
+  function updateCleanCount() {
+    const el = document.getElementById("igsg-pending");
+    if (el) el.textContent = String(pendingCount());
+    const b = document.getElementById("igsg-clean");
+    if (b && !cleanerActive) b.disabled = pendingCount() === 0;
+  }
+
+  function setCleanBtn(running) {
+    const b = document.getElementById("igsg-clean");
+    if (!b) return;
+    b.classList.toggle("igsg-cleaning", running);
+    b.disabled = false;
+    b.textContent = running
+      ? "⏹ Stop cleaning"
+      : "🧹 Clean deleted (" + pendingCount() + ")";
+    if (!running) updateCleanCount();
   }
 
   function buildPanel() {
@@ -218,6 +431,14 @@
       #${PANEL_ID} .igsg-clear{background:transparent;color:#e0245e;font-size:11px}
       #${PANEL_ID} .igsg-min{cursor:pointer;color:#aaa;background:none;width:auto;
         margin:0;padding:0 4px;font-size:16px;line-height:1}
+      #${PANEL_ID} hr{border:0;border-top:1px solid #333;margin:9px 0 6px}
+      #${PANEL_ID} .igsg-sec{font-size:10px;color:#888;letter-spacing:.03em;
+        text-transform:uppercase;margin-bottom:2px}
+      #${PANEL_ID} #igsg-clean{background:#2ea043}
+      #${PANEL_ID} #igsg-clean:hover{background:#3fb950}
+      #${PANEL_ID} #igsg-clean:disabled{background:#2a2a2a;color:#666;cursor:default}
+      #${PANEL_ID} #igsg-clean.igsg-cleaning{background:#e0245e}
+      #${PANEL_ID} #igsg-clean-status{margin-top:2px;font-size:11px;color:#aaa;min-height:14px}
     `;
     document.documentElement.appendChild(style);
 
@@ -238,6 +459,10 @@
         <button id="igsg-manage">🗂 Open manager</button>
         <button class="igsg-clear" id="igsg-clear">Clear stored (✗)</button>
         <div id="igsg-status"></div>
+        <hr>
+        <div class="igsg-sec">🧹 Clean deleted from Instagram</div>
+        <button id="igsg-clean" disabled>🧹 Clean deleted (0)</button>
+        <div id="igsg-clean-status"></div>
       </div>
     `;
     document.documentElement.appendChild(p);
@@ -268,6 +493,10 @@
       renderCount();
       setStatus("Cleared.");
     };
+    p.querySelector("#igsg-clean").onclick = () => {
+      if (cleanerActive) stopCleaner();
+      else runCleaner();
+    };
     const body = p.querySelector("#igsg-body");
     p.querySelector("#igsg-min").onclick = () => {
       const hidden = body.style.display === "none";
@@ -276,6 +505,7 @@
     };
 
     renderCount();
+    updateCleanCount();
   }
 
   function removePanel() {
@@ -290,10 +520,17 @@
   }
 
   async function syncForRoute() {
+    // While cleaning we deliberately navigate into /p/ post modals — keep the
+    // panel alive and don't rebuild/teardown on those route changes.
+    if (cleanerActive) return;
     if (isSavedPage()) {
-      items = await store.all();
+      const r = await chrome.storage.local.get([STORE_KEY, DELETED_KEY]);
+      items = r[STORE_KEY] || {};
+      deletedMap = r[DELETED_KEY] || {};
+      deletedSet = new Set(Object.keys(deletedMap));
       buildPanel();
       renderCount();
+      updateCleanCount();
     } else {
       removePanel();
     }
@@ -307,17 +544,21 @@
     }
   }, 800);
 
-  // Keep the deleted set fresh if the manager tab changes it while scrolling.
+  // Keep the deleted set/map fresh if the manager tab changes it while we're
+  // on the saved page (don't clobber our own writes mid-clean).
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes[DELETED_KEY]) {
-      deletedSet = new Set(Object.keys(changes[DELETED_KEY].newValue || {}));
+      deletedMap = changes[DELETED_KEY].newValue || {};
+      deletedSet = new Set(Object.keys(deletedMap));
+      if (!cleanerActive) updateCleanCount();
     }
   });
 
   // init
   chrome.storage.local.get([STORE_KEY, DELETED_KEY]).then((r) => {
     items = r[STORE_KEY] || {};
-    deletedSet = new Set(Object.keys(r[DELETED_KEY] || {}));
+    deletedMap = r[DELETED_KEY] || {};
+    deletedSet = new Set(Object.keys(deletedMap));
     syncForRoute();
   });
 })();
