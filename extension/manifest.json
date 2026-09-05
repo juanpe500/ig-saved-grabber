@@ -3,8 +3,14 @@
   "name": "IG Saved Grabber",
   "version": "1.0.0",
   "description": "Capture URLs, thumbnails and descriptions from your Instagram saved page while you scroll, then export as JSON or CSV.",
-  "permissions": ["storage"],
-  "host_permissions": ["https://www.instagram.com/*"],
+  "permissions": ["storage", "downloads", "unlimitedStorage"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://i.instagram.com/*",
+    "https://*.cdninstagram.com/*",
+    "https://*.fbcdn.net/*",
+    "https://openrouter.ai/*"
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

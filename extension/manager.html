@@ -51,6 +51,11 @@
     .btn:hover, select:hover { background: var(--panel2); }
     .btn.accent { background: var(--accent); border-color: var(--accent); font-weight: 600; }
     .btn.danger { color: var(--pink); }
+    .num-filter {
+      width: 88px; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--text); font-size: 13px; outline: none;
+    }
+    .num-filter:focus { border-color: var(--accent); }
     main { padding: 20px 22px 80px; }
     .grid {
       display: grid; gap: 16px;
@@ -120,6 +125,78 @@
     }
     .empty-state h2 { color: var(--text); margin-bottom: 6px; }
     mark { background: #ffd84d; color: #000; border-radius: 3px; padding: 0 1px; }
+    /* 9:16 iframe preview modal */
+    .modal-back {
+      position: fixed; inset: 0; z-index: 100; display: none;
+      flex-direction: column; align-items: center;
+      background: rgba(0,0,0,.78); backdrop-filter: blur(4px);
+    }
+    .modal-back.show { display: flex; }
+    /* stage holds the modal, centered in the space left below the top bar */
+    .mv-stage {
+      flex: 1 1 auto; min-height: 0; width: 100%;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal {
+      position: relative; background: #000; border-radius: 16px; overflow: hidden;
+      border: 1px solid var(--border); box-shadow: 0 24px 70px rgba(0,0,0,.7);
+      /* width/height set in JS (persisted); sensible floor here */
+      min-width: 220px; min-height: 300px;
+    }
+    .modal iframe { width: 100%; height: 100%; border: 0; display: block; background: #000; }
+    .modal-grip {
+      position: absolute; bottom: 0; right: 0; z-index: 3; width: 22px; height: 22px;
+      cursor: nwse-resize; background:
+        linear-gradient(135deg, transparent 0 45%, rgba(255,255,255,.55) 45% 55%, transparent 55% 70%, rgba(255,255,255,.55) 70% 80%, transparent 80%);
+    }
+    .modal.resizing iframe { pointer-events: none; }
+    /* description + tag chips, pinned to the very top of the backdrop */
+    .mv-topbar {
+      flex: 0 0 auto; z-index: 4; width: min(760px, 94vw); padding: 12px 14px;
+      max-height: 26vh; overflow: auto; /* scroll when the description is long */
+      background: rgba(11,11,12,.92); border: 1px solid var(--border);
+      border-top: 0; border-radius: 0 0 14px 14px;
+    }
+    .mv-desc {
+      color: #ececf0; font-size: 13.5px; line-height: 1.55; text-align: center;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .mv-desc .mv-empty { color: var(--muted); font-style: italic; }
+    .mv-chip {
+      display: inline-block; background: var(--accent); color: #fff; font-weight: 600;
+      font-size: 12px; line-height: 1.4; padding: 1px 8px; margin: 0 1px; border-radius: 999px;
+      white-space: nowrap;
+    }
+    /* floating side navigation */
+    .mv-nav {
+      position: absolute; top: 50%; transform: translateY(-50%); z-index: 5;
+      width: 52px; height: 52px; border-radius: 50%; border: 0; cursor: pointer;
+      background: rgba(0,0,0,.55); color: #fff; font-size: 30px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .mv-nav:hover { background: var(--accent); }
+    .mv-nav:disabled { opacity: .25; cursor: default; background: rgba(0,0,0,.55); }
+    .mv-prev { left: 18px; }
+    .mv-next { right: 18px; }
+    /* delete (soft) button, top-left of the frame */
+    .mv-del {
+      position: absolute; top: 10px; left: 10px; z-index: 2; width: 34px; height: 34px;
+      border-radius: 50%; border: 0; background: rgba(0,0,0,.65); color: #fff;
+      font-size: 16px; line-height: 1; cursor: pointer;
+    }
+    .mv-del:hover { background: var(--pink); }
+    .modal-close {
+      position: absolute; top: 10px; right: 10px; z-index: 2; width: 34px; height: 34px;
+      border-radius: 50%; border: 0; background: rgba(0,0,0,.65); color: #fff;
+      font-size: 20px; line-height: 1; cursor: pointer;
+    }
+    .modal-close:hover { background: var(--pink); }
+    .modal-open {
+      position: absolute; bottom: 10px; right: 12px; z-index: 2;
+      color: #fff; background: rgba(0,0,0,.6); border-radius: 8px;
+      padding: 5px 10px; font-size: 12px; font-weight: 600; text-decoration: none;
+    }
+    .modal-open:hover { background: var(--accent); }
     /* tags panel */
     .tags-panel {
       border-bottom: 1px solid var(--border); background: var(--panel);
@@ -167,6 +244,46 @@
     /* copy-select ring (Ctrl/⌘+click), independent of filter state */
     .tag.pick { box-shadow: inset 0 0 0 2px #ffd84d; }
     .tags-hint b { color: #cfcfd4; }
+    /* transcription */
+    .tr-field {
+      padding: 8px 11px; border-radius: 9px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 13px; outline: none;
+    }
+    .tr-field:focus { border-color: var(--accent); }
+    .tr-key { min-width: 240px; flex: 1 1 240px; font-family: ui-monospace, monospace; }
+    .tr-model { min-width: 220px; }
+    /* on-card transcribe control + result */
+    .tr-btn {
+      border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+      border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+      padding: 4px 8px; display: inline-flex; align-items: center; gap: 5px;
+    }
+    .tr-btn:hover { background: var(--accent); border-color: var(--accent); }
+    .tr-btn.busy { opacity: .6; cursor: default; }
+    .tr-btn.done { color: #2ecc71; border-color: #2ecc71; }
+    .tr-btn.err  { color: var(--pink); border-color: var(--pink); }
+    .tr-text {
+      font-size: 12px; color: #c9c9cf; line-height: 1.5; margin: 0;
+      white-space: pre-wrap; max-height: 96px; overflow: auto;
+      border-left: 2px solid var(--border); padding-left: 8px;
+    }
+    .tr-text.err { color: var(--pink); border-left-color: var(--pink); }
+    .tr-copy {
+      background: none; border: 0; color: var(--accent); cursor: pointer;
+      font-size: 11px; font-weight: 600; padding: 0;
+    }
+    .tr-copy:hover { text-decoration: underline; }
+    /* engagement stats */
+    .stats-area { display: flex; flex-direction: column; gap: 4px; }
+    .stats-line { display: flex; gap: 14px; align-items: center; }
+    .stat {
+      display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+      color: #d7d7db; font-variant-numeric: tabular-nums; font-weight: 600;
+    }
+    .stat .ic { opacity: .85; font-weight: 400; }
+    .stats-bottom { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .stats-meta { color: var(--muted); font-size: 11px; }
+    .stats-area .tr-text.err { margin: 0; }
   </style>
 </head>
 <body>
@@ -194,12 +311,49 @@
         <option value="48">48 / page</option>
         <option value="96">96 / page</option>
       </select>
+      <select id="sort" title="Sort (stat sorts need details fetched)">
+        <option value="saved-desc">↓ Newest saved</option>
+        <option value="saved-asc">↑ Oldest saved</option>
+        <option value="views-desc">▶ Most views</option>
+        <option value="views-asc">▶ Fewest views</option>
+        <option value="likes-desc">❤ Most likes</option>
+        <option value="likes-asc">❤ Fewest likes</option>
+        <option value="comments-desc">💬 Most comments</option>
+        <option value="posted-desc">📅 Newest posted</option>
+        <option value="posted-asc">📅 Oldest posted</option>
+      </select>
+      <input id="minLikes" class="num-filter" type="number" min="0" step="1" placeholder="min ❤" title="Minimum likes (excludes items without details)" />
+      <input id="minViews" class="num-filter" type="number" min="0" step="1" placeholder="min ▶" title="Minimum views (excludes items without details)" />
       <button class="btn" id="gentags">🏷 Generate tags</button>
+      <button class="btn" id="detailsBatch">📊 Fetch details (page)</button>
+      <button class="btn" id="trToggle">🎙 Transcripts</button>
       <button class="btn" id="json">Export JSON</button>
       <button class="btn" id="csv">Export CSV</button>
       <button class="btn" id="viewToggle">🗑 Deleted (0)</button>
     </div>
   </header>
+
+  <section class="tags-panel" id="trPanel" style="display:none">
+    <div class="tags-head">
+      <div>
+        <strong>🎙 Reel transcripts</strong>
+        <span class="pageinfo" id="trStat"></span>
+      </div>
+      <div class="tags-actions">
+        <input id="trKey" class="tr-field tr-key" type="password" placeholder="OpenRouter API key (sk-or-…)" autocomplete="off" />
+        <input id="trModel" class="tr-field tr-model" type="text" placeholder="model slug" autocomplete="off" />
+        <button class="btn accent" id="trSave">Save</button>
+        <button class="btn" id="trBatch">Transcribe visible reels</button>
+        <button class="btn danger" id="trStop" style="display:none">Stop</button>
+      </div>
+    </div>
+    <p class="tags-hint">
+      Transcribes reels with Whisper via <b>OpenRouter</b> — your key stays in this
+      browser. Fetches the lowest-res copy just for its audio, then discards it.
+      Use <b>🎙 on a card</b> for one, or <b>Transcribe visible reels</b> for the page.
+      <span id="trBatchStat"></span>
+    </p>
+  </section>
 
   <section class="tags-panel" id="tagsPanel" style="display:none">
     <div class="tags-head">
@@ -261,6 +415,23 @@
     </div>
     <div class="pager" id="pager"></div>
   </main>
+
+  <div class="modal-back" id="modalBack">
+    <div class="mv-topbar" id="mvTopbar">
+      <div class="mv-desc" id="mvDesc"></div>
+    </div>
+    <button class="mv-nav mv-prev" id="mvPrev" title="Previous (←)">‹</button>
+    <button class="mv-nav mv-next" id="mvNext" title="Next (→)">›</button>
+    <div class="mv-stage" id="mvStage">
+    <div class="modal" id="modal">
+      <button class="modal-close" id="modalClose" title="Close (Esc)">×</button>
+      <button class="mv-del" id="mvDel" title="Move to deleted list (un-saves on next Clean)">🗑</button>
+      <a class="modal-open" id="modalOpen" target="_blank" rel="noopener">Open on IG ↗</a>
+      <iframe id="modalFrame" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+      <div class="modal-grip" id="modalGrip" title="Drag to resize"></div>
+    </div>
+    </div>
+  </div>
 
   <script src="manager.js"></script>
 </body>

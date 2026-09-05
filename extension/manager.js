@@ -8,6 +8,18 @@
   const STORE_KEY = "igsg_items";
   const IGNORE_KEY = "igsg_ignore"; // user-added words to exclude from tags
   const DELETED_KEY = "igsg_deleted"; // isolated list of removed items
+  const SETTINGS_KEY = "igsg_settings"; // { key, model } for transcription
+  const TRANSCRIPTS_KEY = "igsg_transcripts"; // { [shortcode]: {text|error, ...} }
+  const DETAILS_KEY = "igsg_details"; // { [shortcode]: {likes, views, ...} | {error} }
+  const THUMBS_KEY = "igsg_thumbs"; // { [shortcode]: dataUrl } locally-cached thumbnails
+  const DEFAULT_MODEL = "openai/whisper-large-v3-turbo";
+
+  let settings = { key: "", model: DEFAULT_MODEL };
+  let transcripts = {};        // shortcode -> { text, error, stage, language, cost, at }
+  let details = {};            // shortcode -> { likes, views, comments, caption, ... } | { error }
+  let thumbs = {};             // shortcode -> data URL (locally cached, never expires)
+  let batchRunning = false;
+  let batchStop = false;
 
   // Common English + Spanish function words we never want as tags.
   const STOPWORDS = new Set((`
@@ -45,6 +57,9 @@
     search: document.getElementById("search"),
     filter: document.getElementById("filter"),
     perpage: document.getElementById("perpage"),
+    sort: document.getElementById("sort"),
+    minLikes: document.getElementById("minLikes"),
+    minViews: document.getElementById("minViews"),
     json: document.getElementById("json"),
     csv: document.getElementById("csv"),
     gentags: document.getElementById("gentags"),
@@ -64,7 +79,224 @@
     restorePending: document.getElementById("restorePending"),
     removeCleared: document.getElementById("removeCleared"),
     exportDeleted: document.getElementById("exportDeleted"),
+    modalBack: document.getElementById("modalBack"),
+    modal: document.getElementById("modal"),
+    modalFrame: document.getElementById("modalFrame"),
+    modalClose: document.getElementById("modalClose"),
+    modalOpen: document.getElementById("modalOpen"),
+    modalGrip: document.getElementById("modalGrip"),
+    mvTopbar: document.getElementById("mvTopbar"),
+    mvDesc: document.getElementById("mvDesc"),
+    mvPrev: document.getElementById("mvPrev"),
+    mvNext: document.getElementById("mvNext"),
+    mvDel: document.getElementById("mvDel"),
+    trToggle: document.getElementById("trToggle"),
+    trPanel: document.getElementById("trPanel"),
+    trKey: document.getElementById("trKey"),
+    trModel: document.getElementById("trModel"),
+    trSave: document.getElementById("trSave"),
+    trBatch: document.getElementById("trBatch"),
+    trStop: document.getElementById("trStop"),
+    trStat: document.getElementById("trStat"),
+    trBatchStat: document.getElementById("trBatchStat"),
+    detailsBatch: document.getElementById("detailsBatch"),
   };
+
+  // ── 9:16 iframe preview modal ─────────────────────────────────────────
+  const MODAL_SIZE_KEY = "ig_modal_size";
+  let modalIndex = -1;      // index into `filtered` of the item on screen
+  let wheelLock = false;    // one reel per wheel gesture
+
+  function embedUrl(url) {
+    // https://www.instagram.com/p/CODE/  ->  .../p/CODE/embed/
+    const base = String(url || "").split("?")[0].replace(/\/+$/, "");
+    return base + "/embed/";
+  }
+
+  // Vertical space left for the modal below the (in-flow) description bar.
+  function availStageH() {
+    const tb = el.mvTopbar.offsetHeight || 0;
+    return Math.max(300, window.innerHeight - tb - 24);
+  }
+  function defaultModalSize() {
+    const h = Math.min(availStageH(), 900);
+    return { w: Math.round((h * 9) / 16), h: Math.round(h) };
+  }
+  function applyModalSize(s) {
+    const maxW = window.innerWidth - 24, maxH = availStageH();
+    const w = Math.max(220, Math.min(s.w, maxW));
+    const h = Math.max(300, Math.min(s.h, maxH));
+    el.modal.style.width = w + "px";
+    el.modal.style.height = h + "px";
+  }
+  function loadModalSize() {
+    try {
+      const raw = localStorage.getItem(MODAL_SIZE_KEY);
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s && s.w && s.h) return s;
+      }
+    } catch {}
+    return defaultModalSize();
+  }
+  function saveModalSize() {
+    const s = { w: el.modal.offsetWidth, h: el.modal.offsetHeight };
+    try { localStorage.setItem(MODAL_SIZE_KEY, JSON.stringify(s)); } catch {}
+  }
+
+  // Build the description bar: plain text, but hashtags and words that are
+  // recognized tags (stem in keptStems) render as chips/badges.
+  function chip(label) {
+    const s = document.createElement("span");
+    s.className = "mv-chip";
+    s.textContent = label;
+    return s;
+  }
+  function renderDesc(alt) {
+    const box = el.mvDesc;
+    box.innerHTML = "";
+    const text = (alt || "").trim();
+    if (!text) {
+      const em = document.createElement("span");
+      em.className = "mv-empty";
+      em.textContent = "No description";
+      box.appendChild(em);
+      return;
+    }
+    const re = /(#[\p{L}\p{N}_]+)|([\p{L}\p{N}][\p{L}\p{N}'_-]*)/gu;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) box.appendChild(document.createTextNode(text.slice(last, m.index)));
+      if (m[1]) {
+        box.appendChild(chip(m[1])); // hashtag → always a chip
+      } else {
+        const word = m[2];
+        const stem = singularize(word.toLowerCase());
+        if (keptStems.has(stem)) box.appendChild(chip(word));
+        else box.appendChild(document.createTextNode(word));
+      }
+      last = re.lastIndex;
+    }
+    if (last < text.length) box.appendChild(document.createTextNode(text.slice(last)));
+  }
+  function updateNav() {
+    const inList = modalIndex >= 0;
+    el.mvPrev.disabled = !inList || modalIndex <= 0;
+    el.mvNext.disabled = !inList || modalIndex >= filtered.length - 1;
+    // delete only makes sense from the gallery (soft-move to deleted list)
+    el.mvDel.style.display = view === "deleted" ? "none" : "";
+  }
+  function renderModalMeta(it) {
+    renderDesc(it && it.alt);
+    updateNav();
+  }
+  function showAtIndex(i) {
+    if (i < 0 || i >= filtered.length) return;
+    modalIndex = i;
+    const it = filtered[i];
+    el.modalFrame.src = embedUrl(it.url);
+    el.modalOpen.href = it.url;
+    renderModalMeta(it);
+    // Re-fit under the (now-rendered) description bar unless the user is
+    // mid-drag resizing; keeps the frame from ever slipping behind the bar.
+    if (!el.modal.classList.contains("resizing")) applyModalSize(loadModalSize());
+  }
+  function openModal(it) {
+    if (!it || !it.url) return;
+    // reset to flex-centered layout (a prior drag may have pinned it absolute)
+    el.modal.style.position = "";
+    el.modal.style.left = "";
+    el.modal.style.top = "";
+    el.modalBack.classList.add("show"); // show first so topbar height is measurable
+    const idx = filtered.indexOf(it);
+    modalIndex = idx;
+    if (idx >= 0) {
+      showAtIndex(idx);
+    } else { // item not in current list — still show it standalone
+      el.modalFrame.src = embedUrl(it.url);
+      el.modalOpen.href = it.url;
+      renderModalMeta(it);
+      applyModalSize(loadModalSize());
+    }
+  }
+  function closeModal() {
+    el.modalBack.classList.remove("show");
+    el.modalFrame.src = "about:blank";
+    modalIndex = -1;
+  }
+  function stepModal(dir) {
+    if (modalIndex < 0) return;
+    const next = modalIndex + dir;
+    if (next < 0 || next >= filtered.length) return;
+    showAtIndex(next);
+  }
+
+  el.modalClose.addEventListener("click", closeModal);
+  el.modalBack.addEventListener("click", (e) => {
+    if (e.target === el.modalBack) closeModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!el.modalBack.classList.contains("show")) return;
+    if (e.key === "Escape") closeModal();
+    else if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); stepModal(1); }
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); stepModal(-1); }
+  });
+  // Wheel down → next reel, wheel up → previous. One step per gesture.
+  el.modalBack.addEventListener("wheel", (e) => {
+    // Let the description bar scroll natively instead of navigating.
+    if (e.target.closest("#mvTopbar")) return;
+    e.preventDefault();
+    if (wheelLock) return;
+    if (Math.abs(e.deltaY) < 8) return;
+    wheelLock = true;
+    stepModal(e.deltaY > 0 ? 1 : -1);
+    setTimeout(() => { wheelLock = false; }, 260);
+  }, { passive: false });
+
+  // Drag-to-resize via corner grip; size persists in localStorage.
+  el.modalGrip.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startX = e.clientX, startY = e.clientY;
+    const startW = el.modal.offsetWidth, startH = el.modal.offsetHeight;
+    // Pin the modal's current top-left so it grows toward the cursor, not from center.
+    const rect = el.modal.getBoundingClientRect();
+    el.modal.style.position = "absolute";
+    el.modal.style.left = rect.left + "px";
+    el.modal.style.top = rect.top + "px";
+    el.modal.classList.add("resizing");
+    const onMove = (ev) => {
+      applyModalSize({ w: startW + (ev.clientX - startX), h: startH + (ev.clientY - startY) });
+    };
+    const onUp = () => {
+      el.modal.classList.remove("resizing");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      saveModalSize();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+
+  // Floating side navigation.
+  el.mvPrev.addEventListener("click", () => stepModal(-1));
+  el.mvNext.addEventListener("click", () => stepModal(1));
+
+  // Soft-delete the current item from within the modal: moves it to the
+  // deleted list (un-saved on IG only when you later run "Clean deleted").
+  async function deleteCurrentModal() {
+    if (view === "deleted" || modalIndex < 0) return;
+    const cur = filtered[modalIndex];
+    if (!cur) return;
+    const sc = cur.shortcode;
+    const idx = modalIndex;
+    await moveToDeleted(sc);
+    // Reconcile with the (possibly already reloaded) list, then advance.
+    const i = filtered.findIndex((x) => x.shortcode === sc);
+    if (i >= 0) filtered.splice(i, 1);
+    if (!filtered.length) { closeModal(); return; }
+    showAtIndex(Math.min(idx, filtered.length - 1));
+  }
+  el.mvDel.addEventListener("click", deleteCurrentModal);
 
   let deletedAll = [];        // isolated deleted items (newest first)
   let view = "gallery";       // "gallery" | "deleted"
@@ -84,6 +316,9 @@
   let perPage = 24;
   let query = "";
   let typeFilter = "all";
+  let sortMode = "saved-desc"; // saved|views|likes|comments|posted + -asc|-desc
+  let minLikes = 0;
+  let minViews = 0;
 
   // ---- load ----
   async function load() {
@@ -98,6 +333,45 @@
     );
     updateDeletedUI();
     applyFilters(true);
+  }
+
+  // ---- stat accessors (from fetched details) ----
+  function statNum(it, key) {
+    const d = details[it.shortcode];
+    if (!d || d.error) return null;
+    const v = d[key];
+    return typeof v === "number" && v >= 0 ? v : null;
+  }
+  const getLikes = (it) => statNum(it, "likes");
+  const getViews = (it) => statNum(it, "views");
+  const getComments = (it) => statNum(it, "comments");
+  function getPosted(it) {
+    const d = details[it.shortcode];
+    return d && !d.error && d.takenAt ? d.takenAt : null;
+  }
+
+  // Sort `filtered` in place per sortMode. Items missing the stat always sink
+  // to the bottom, regardless of direction, so un-fetched posts don't pollute
+  // the top of a "most views" view.
+  function sortFiltered() {
+    const dash = sortMode.lastIndexOf("-");
+    const field = sortMode.slice(0, dash);
+    const dir = sortMode.slice(dash + 1);
+    const mul = dir === "asc" ? 1 : -1;
+    if (field === "saved") {
+      filtered.sort((a, b) => mul * (a.captured_at || "").localeCompare(b.captured_at || ""));
+      return;
+    }
+    const get = field === "views" ? getViews : field === "likes" ? getLikes
+      : field === "comments" ? getComments : field === "posted" ? getPosted : null;
+    if (!get) return;
+    filtered.sort((a, b) => {
+      const va = get(a), vb = get(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;   // nulls last
+      if (vb == null) return -1;
+      return mul * (va - vb);
+    });
   }
 
   // ---- filtering ----
@@ -123,6 +397,9 @@
         // Advanced tag filter: AND of all includes, none of the excludes.
         for (const s of includes) if (!postMatchesTag(it, s)) return false;
         for (const s of excludes) if (postMatchesTag(it, s)) return false;
+        // Minimum engagement thresholds (require fetched details).
+        if (minLikes > 0) { const l = getLikes(it); if (l == null || l < minLikes) return false; }
+        if (minViews > 0) { const v = getViews(it); if (v == null || v < minViews) return false; }
       }
       if (q) {
         const hay = ((it.alt || "") + " " + (it.shortcode || "")).toLowerCase();
@@ -130,6 +407,7 @@
       }
       return true;
     });
+    if (!deletedView) sortFiltered();
     if (resetPage) page = 1;
     const maxPage = Math.max(1, Math.ceil(filtered.length / perPage));
     if (page > maxPage) page = maxPage;
@@ -210,15 +488,22 @@
 
     const thumb = document.createElement("a");
     thumb.className = "thumb";
+    thumb.dataset.sc = it.shortcode;
     thumb.href = it.url;
     thumb.target = "_blank";
     thumb.rel = "noopener";
+    thumb.addEventListener("click", (e) => {
+      if (e.target.closest(".del")) return; // let delete/restore button work
+      e.preventDefault();
+      openModal(it);
+    });
 
-    if (it.image) {
+    const thumbSrc = thumbs[it.shortcode] || it.image;
+    if (thumbSrc) {
       const img = document.createElement("img");
       img.loading = "lazy";
       img.referrerPolicy = "no-referrer";
-      img.src = it.image;
+      img.src = thumbSrc;
       img.alt = it.alt || "";
       img.onerror = () => {
         img.remove();
@@ -278,10 +563,20 @@
     open.target = "_blank";
     open.rel = "noopener";
     open.textContent = "Open ↗";
+    open.addEventListener("click", (e) => { e.preventDefault(); openModal(it); });
     const code = document.createElement("span");
     code.className = "code";
     code.textContent = it.shortcode || "";
-    foot.append(open, code);
+    if (view !== "deleted" && canTranscribe(it)) {
+      const dl = document.createElement("button");
+      dl.className = "tr-copy";
+      dl.textContent = "⬇ Video";
+      dl.title = "Download the video (best quality)";
+      dl.onclick = (e) => { e.preventDefault(); downloadReel(it, dl); };
+      foot.append(open, dl, code);
+    } else {
+      foot.append(open, code);
+    }
 
     if (view === "deleted") {
       const st = document.createElement("div");
@@ -289,7 +584,20 @@
       st.textContent = it.cleared_on_ig ? "✓ cleared on Instagram" : "● pending on Instagram";
       body.append(desc, st, foot);
     } else {
-      body.append(desc, foot);
+      const statsBox = document.createElement("div");
+      statsBox.className = "stats-area";
+      statsBox.dataset.sc = it.shortcode;
+      renderStatsArea(statsBox, it);
+      const kids = [desc, statsBox];
+      if (canTranscribe(it)) {
+        const trBox = document.createElement("div");
+        trBox.className = "tr-area";
+        trBox.dataset.sc = it.shortcode;
+        renderTrArea(trBox, it);
+        kids.push(trBox);
+      }
+      kids.push(foot);
+      body.append(...kids);
     }
     c.append(thumb, body);
     return c;
@@ -799,6 +1107,354 @@
     download("ig_tags_" + stamp() + ".csv", "﻿" + lines.join("\r\n"), "text/csv");
   }
 
+  // ---- transcription ----
+  async function loadSettings() {
+    const r = await chrome.storage.local.get([SETTINGS_KEY, TRANSCRIPTS_KEY, DETAILS_KEY, THUMBS_KEY]);
+    settings = { key: "", model: DEFAULT_MODEL, ...(r[SETTINGS_KEY] || {}) };
+    if (!settings.model) settings.model = DEFAULT_MODEL;
+    transcripts = r[TRANSCRIPTS_KEY] || {};
+    details = r[DETAILS_KEY] || {};
+    thumbs = r[THUMBS_KEY] || {};
+    el.trKey.value = settings.key || "";
+    el.trModel.value = settings.model;
+    updateTrStat();
+  }
+
+  function persistDetails() { return chrome.storage.local.set({ [DETAILS_KEY]: details }); }
+  function persistThumbs() { return chrome.storage.local.set({ [THUMBS_KEY]: thumbs }); }
+
+  function fmtNum(n) {
+    if (n == null || n < 0) return "—";
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, "") + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, "") + "k";
+    return String(n);
+  }
+  function fmtDate(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (isNaN(d)) return "";
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+  function escSel(sc) { return window.CSS && CSS.escape ? CSS.escape(sc) : sc; }
+
+  function statChip(icon, val) {
+    const s = document.createElement("span");
+    s.className = "stat";
+    const i = document.createElement("span");
+    i.className = "ic";
+    i.textContent = icon;
+    const v = document.createElement("span");
+    v.textContent = val;
+    s.append(i, v);
+    return s;
+  }
+
+  // Render engagement stats (or the fetch button / error) into a card box.
+  function renderStatsArea(box, it) {
+    const d = details[it.shortcode];
+    box.replaceChildren();
+    if (d && d.error) {
+      const p = document.createElement("p");
+      p.className = "tr-text err";
+      p.textContent = "[" + (d.stage || "error") + "] " + d.error;
+      const re = document.createElement("button");
+      re.className = "tr-copy";
+      re.textContent = "Retry";
+      re.onclick = () => fetchDetailsFor(it, box);
+      box.append(p, re);
+    } else if (d) {
+      const line = document.createElement("div");
+      line.className = "stats-line";
+      line.append(statChip("❤", fmtNum(d.likes)));
+      if (d.views != null && d.views >= 0) line.append(statChip("▶", fmtNum(d.views)));
+      line.append(statChip("💬", fmtNum(d.comments)));
+      const bottom = document.createElement("div");
+      bottom.className = "stats-bottom";
+      const meta = document.createElement("span");
+      meta.className = "stats-meta";
+      const bits = [];
+      if (d.username) bits.push("@" + d.username);
+      const dt = fmtDate(d.takenAt);
+      if (dt) bits.push(dt);
+      meta.textContent = bits.join(" · ");
+      const re = document.createElement("button");
+      re.className = "tr-copy";
+      re.textContent = "↻";
+      re.title = "Refresh details";
+      re.onclick = () => fetchDetailsFor(it, box);
+      bottom.append(meta, re);
+      box.append(line, bottom);
+    } else {
+      const b = document.createElement("button");
+      b.className = "tr-btn";
+      b.textContent = "📊 Likes / views";
+      b.onclick = () => fetchDetailsFor(it, box);
+      box.append(b);
+    }
+  }
+
+  // Swap a card's (possibly expired) thumbnail for the freshly cached one.
+  function refreshCardThumb(sc, dataUrl) {
+    const t = document.querySelector('.thumb[data-sc="' + escSel(sc) + '"]');
+    if (!t) return;
+    const ph = t.querySelector(".ph");
+    if (ph) ph.remove();
+    let img = t.querySelector("img");
+    if (!img) {
+      img = document.createElement("img");
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      t.insertBefore(img, t.firstChild);
+    }
+    img.src = dataUrl;
+  }
+
+  // Fetch stats + a locally-cached thumbnail for one item.
+  async function fetchDetailsFor(it, box) {
+    const sc = it.shortcode;
+    if (box) {
+      box.replaceChildren();
+      const busy = document.createElement("button");
+      busy.className = "tr-btn busy";
+      busy.textContent = "⏳ Fetching…";
+      busy.disabled = true;
+      box.append(busy);
+    }
+    let resp;
+    try { resp = await chrome.runtime.sendMessage({ type: "igsg_fetchInfo", shortcode: sc, thumb: true }); }
+    catch (e) { resp = { ok: false, error: String((e && e.message) || e) }; }
+    if (resp && resp.ok) {
+      details[sc] = { ...resp.stats, at: new Date().toISOString() };
+      await persistDetails();
+      if (resp.thumbDataUrl) {
+        thumbs[sc] = resp.thumbDataUrl;
+        await persistThumbs();
+        refreshCardThumb(sc, resp.thumbDataUrl);
+      }
+    } else {
+      details[sc] = {
+        error: (resp && resp.error) || "Unknown error",
+        stage: (resp && resp.stage) || "unknown", at: new Date().toISOString(),
+      };
+    }
+    if (box) renderStatsArea(box, it);
+    return resp || { ok: false };
+  }
+
+  // Batch: fetch details for every item on the current page missing them.
+  async function runDetailsBatch() {
+    if (batchRunning) return;
+    const start = (page - 1) * perPage;
+    const slice = filtered.slice(start, start + perPage).filter(
+      (it) => !(details[it.shortcode] && !details[it.shortcode].error)
+    );
+    if (!slice.length) { flashDetailsBtn("Page already fetched"); return; }
+    batchRunning = true; batchStop = false;
+    const label = el.detailsBatch.textContent;
+    let done = 0, failed = 0;
+    for (const it of slice) {
+      if (batchStop) break;
+      const box = document.querySelector('.stats-area[data-sc="' + escSel(it.shortcode) + '"]');
+      const resp = await fetchDetailsFor(it, box);
+      if (resp && resp.ok) done++; else failed++;
+      el.detailsBatch.textContent = "📊 " + done + "/" + slice.length + (failed ? " (" + failed + "✗)" : "");
+      await new Promise((r) => setTimeout(r, 450)); // pace to stay under IG rate limits
+    }
+    batchRunning = false;
+    el.detailsBatch.textContent = label;
+    flashDetailsBtn((batchStop ? "Stopped" : "Done") + " — " + done + " fetched" + (failed ? ", " + failed + "✗" : ""));
+    // Re-sort / re-filter now that new numbers exist, if the view depends on them.
+    const statSort = /^(views|likes|comments|posted)-/.test(sortMode);
+    if (statSort || minLikes > 0 || minViews > 0) applyFilters(false);
+  }
+
+  let detailsFlashTimer = null;
+  function flashDetailsBtn(msg) {
+    const label = "📊 Fetch details (page)";
+    el.detailsBatch.textContent = msg;
+    clearTimeout(detailsFlashTimer);
+    detailsFlashTimer = setTimeout(() => { el.detailsBatch.textContent = label; }, 2200);
+  }
+
+  async function saveSettings() {
+    settings.key = el.trKey.value.trim();
+    settings.model = el.trModel.value.trim() || DEFAULT_MODEL;
+    el.trModel.value = settings.model;
+    await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+    pulseStat(settings.key ? "Saved ✓" : "Saved — no key set yet.");
+  }
+
+  function persistTranscripts() {
+    return chrome.storage.local.set({ [TRANSCRIPTS_KEY]: transcripts });
+  }
+
+  function updateTrStat() {
+    const n = Object.values(transcripts).filter((t) => t && t.text).length;
+    el.trStat.textContent = n ? n + " transcribed" : "";
+  }
+
+  let statTimer = null;
+  function pulseStat(msg) {
+    el.trStat.textContent = msg;
+    clearTimeout(statTimer);
+    statTimer = setTimeout(updateTrStat, 2200);
+  }
+  function setBatchStat(msg) { el.trBatchStat.textContent = msg; }
+
+  function openTr(show) {
+    const vis = show != null ? show : el.trPanel.style.display === "none";
+    el.trPanel.style.display = vis ? "" : "none";
+  }
+
+  const canTranscribe = (it) => !!(it.is_reel || it.type === "tv");
+  function trBoxFor(sc) {
+    return document.querySelector('.tr-area[data-sc="' + (window.CSS && CSS.escape ? CSS.escape(sc) : sc) + '"]');
+  }
+
+  // Render the transcript control/result for one item into its card box.
+  function renderTrArea(box, it) {
+    const sc = it.shortcode;
+    const rec = transcripts[sc];
+    box.replaceChildren();
+    if (rec && rec.text) {
+      const p = document.createElement("p");
+      p.className = "tr-text";
+      p.textContent = rec.text;
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:12px;align-items:center;margin-top:4px;flex-wrap:wrap";
+      const copy = document.createElement("button");
+      copy.className = "tr-copy";
+      copy.textContent = "Copy";
+      copy.onclick = () => copyText(rec.text, copy);
+      const re = document.createElement("button");
+      re.className = "tr-copy";
+      re.textContent = "Re-run";
+      re.onclick = () => runTr(it, box);
+      const meta = document.createElement("span");
+      meta.className = "code";
+      const bits = [];
+      if (rec.language) bits.push(rec.language);
+      if (rec.cost != null) bits.push("$" + Number(rec.cost).toFixed(4));
+      meta.textContent = bits.join(" · ");
+      row.append(copy, re, meta);
+      box.append(p, row);
+    } else if (rec && rec.error) {
+      const p = document.createElement("p");
+      p.className = "tr-text err";
+      p.textContent = "[" + (rec.stage || "error") + "] " + rec.error;
+      const re = document.createElement("button");
+      re.className = "tr-copy";
+      re.textContent = "Retry";
+      re.onclick = () => runTr(it, box);
+      box.append(p, re);
+    } else {
+      const b = document.createElement("button");
+      b.className = "tr-btn";
+      b.textContent = "🎙 Transcribe";
+      b.onclick = () => runTr(it, box);
+      box.append(b);
+    }
+  }
+
+  async function copyText(text, btn) {
+    try { await navigator.clipboard.writeText(text); }
+    catch { return; }
+    const prev = btn.textContent;
+    btn.textContent = "Copied ✓";
+    setTimeout(() => { btn.textContent = prev; }, 1200);
+  }
+
+  // Download the reel's video (best quality) via the background service worker.
+  async function downloadReel(it, btn) {
+    const prev = btn.textContent;
+    btn.textContent = "…"; btn.disabled = true; btn.title = "";
+    let resp;
+    try { resp = await chrome.runtime.sendMessage({ type: "igsg_download", shortcode: it.shortcode }); }
+    catch (e) { resp = { ok: false, error: String((e && e.message) || e) }; }
+    if (resp && resp.ok) {
+      btn.textContent = "⬇ Saved";
+    } else {
+      btn.textContent = "⬇ failed";
+      btn.title = (resp && resp.stage ? "[" + resp.stage + "] " : "") + (resp && resp.error || "");
+    }
+    setTimeout(() => { btn.textContent = prev; btn.disabled = false; btn.title = ""; }, 1800);
+  }
+
+  // Transcribe one item; updates its card box in place and persists the result.
+  async function runTr(it, box) {
+    const sc = it.shortcode;
+    if (!settings.key) {
+      openTr(true);
+      pulseStat("Set your OpenRouter API key, then Save — before transcribing.");
+      el.trKey.focus();
+      return { ok: false };
+    }
+    if (box) {
+      box.replaceChildren();
+      const busy = document.createElement("button");
+      busy.className = "tr-btn busy";
+      busy.textContent = "⏳ Transcribing…";
+      busy.disabled = true;
+      box.append(busy);
+    }
+    let resp;
+    try {
+      resp = await chrome.runtime.sendMessage({
+        type: "igsg_transcribe", shortcode: sc, model: settings.model, key: settings.key,
+      });
+    } catch (e) {
+      resp = { ok: false, stage: "message", error: String((e && e.message) || e) };
+    }
+    if (resp && resp.ok) {
+      transcripts[sc] = {
+        text: resp.text || "", language: resp.language || null,
+        cost: resp.cost, durationSec: resp.durationSec || null,
+        model: resp.model || settings.model, at: new Date().toISOString(),
+      };
+    } else {
+      transcripts[sc] = {
+        error: (resp && resp.error) || "Unknown error",
+        stage: (resp && resp.stage) || "unknown", at: new Date().toISOString(),
+      };
+    }
+    await persistTranscripts();
+    if (box) renderTrArea(box, it);
+    updateTrStat();
+    return resp || { ok: false };
+  }
+
+  // Batch over the reels on the current page that aren't transcribed yet.
+  async function runBatch() {
+    if (batchRunning) return;
+    if (!settings.key) {
+      openTr(true);
+      pulseStat("Set your OpenRouter API key, then Save — before transcribing.");
+      el.trKey.focus();
+      return;
+    }
+    const start = (page - 1) * perPage;
+    const slice = filtered.slice(start, start + perPage).filter(
+      (it) => canTranscribe(it) && !(transcripts[it.shortcode] && transcripts[it.shortcode].text)
+    );
+    if (!slice.length) { setBatchStat("No un-transcribed reels on this page."); return; }
+    batchRunning = true; batchStop = false;
+    el.trStop.style.display = "";
+    el.trBatch.disabled = true;
+    let done = 0, failed = 0;
+    for (const it of slice) {
+      if (batchStop) break;
+      const resp = await runTr(it, trBoxFor(it.shortcode));
+      if (resp && resp.ok) done++; else failed++;
+      setBatchStat("Transcribed " + done + "/" + slice.length +
+        (failed ? " · " + failed + " failed" : ""));
+    }
+    batchRunning = false;
+    el.trStop.style.display = "none";
+    el.trBatch.disabled = false;
+    setBatchStat((batchStop ? "Stopped — " : "Done — ") + done + " transcribed" +
+      (failed ? ", " + failed + " failed" : "") + ".");
+  }
+
   // ---- events ----
   let searchTimer = null;
   el.search.addEventListener("input", () => {
@@ -816,6 +1472,21 @@
     perPage = parseInt(el.perpage.value, 10) || 24;
     applyFilters(true);
   });
+  el.sort.addEventListener("change", () => {
+    sortMode = el.sort.value;
+    applyFilters(true);
+  });
+  let minTimer = null;
+  const onMinChange = () => {
+    clearTimeout(minTimer);
+    minTimer = setTimeout(() => {
+      minLikes = Math.max(0, parseInt(el.minLikes.value, 10) || 0);
+      minViews = Math.max(0, parseInt(el.minViews.value, 10) || 0);
+      applyFilters(true);
+    }, 200);
+  };
+  el.minLikes.addEventListener("input", onMinChange);
+  el.minViews.addEventListener("input", onMinChange);
   window.addEventListener("scroll", hideDescPop, true);
   el.json.addEventListener("click", exportJSON);
   el.csv.addEventListener("click", exportCSV);
@@ -843,6 +1514,13 @@
   el.restorePending.addEventListener("click", restorePending);
   el.removeCleared.addEventListener("click", removeCleared);
   el.exportDeleted.addEventListener("click", exportDeleted);
+  el.trToggle.addEventListener("click", () => openTr());
+  el.trSave.addEventListener("click", saveSettings);
+  el.trModel.addEventListener("keydown", (e) => { if (e.key === "Enter") saveSettings(); });
+  el.trKey.addEventListener("keydown", (e) => { if (e.key === "Enter") saveSettings(); });
+  el.trBatch.addEventListener("click", runBatch);
+  el.trStop.addEventListener("click", () => { batchStop = true; setBatchStat("Stopping after current…"); });
+  el.detailsBatch.addEventListener("click", runDetailsBatch);
 
   // Live-refresh if the grabber captures more, or the deleted list changes,
   // while this tab is open.
@@ -857,9 +1535,10 @@
     }
   });
 
-  // Load persisted ignore list, then the collection.
-  chrome.storage.local.get(IGNORE_KEY).then((r) => {
+  // Load persisted ignore list + transcription state, then the collection.
+  chrome.storage.local.get(IGNORE_KEY).then(async (r) => {
     ignore = new Set(r[IGNORE_KEY] || []);
+    await loadSettings();
     load();
   });
 })();
